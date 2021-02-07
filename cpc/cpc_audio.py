@@ -79,18 +79,43 @@ class ConvNetEncoder(nn.Module):
 
 
 class GRUAutoRegressiveModel(nn.Module):
-    def __init__(self, embedding_size, hidden_size=256):
+    def __init__(self, embedding_size, hidden_size=256, keep_hidden=False):
         super().__init__()
         self.embedding_size = embedding_size
         self.hidden_size = hidden_size
+        self.keep_hidden = keep_hidden
+        self.hidden = None
 
         self.rnn = nn.GRU(self.embedding_size, hidden_size=self.hidden_size, num_layers=1, batch_first=True)
 
-    def forward(self, x, h_0=0):
-        x, h = self.rnn(x, h_0)  # (batch, seq_len, hidden_size)
-        return x, h
+    def forward(self, x):
+        x, h = self.rnn(x, self.hidden)  # (batch, seq_len, hidden_size)
+        if self.keep_hidden:
+            self.hidden = h.detach()
+        return x
 
 
+
+class CPCCriterion(nn.Module):
+    def __init__(self, ar_embedding_size, enc_embedding_size, n_predictions):
+        self.ar_embedding_size = ar_embedding_size
+        self.enc_embedding_size = enc_embedding_size
+        self.loss_function = nn.CrossEntropyLoss()
+        self.prediction_models = []
+        for _ in self.n_prediction:
+            self.prediction_models.append(
+                LinearPredictionModel(self.ar_embedding_size, self.enc_embedding_size)
+            )
+
+    def forward(self, c_t, samples, labels):
+        samples, labels = self.get_samples(z_features)
+        predictions = []
+        for k in range(1, self.n_prediction + 1):
+            pred = samples[:, -k, :] * self.prediction_models[-k](c_t)  # scalar product
+            predictions.append(pred)
+
+        loss = torch.mean(losses)
+        return loss
 
 class LinearPredictionModel(nn.Module):
     def __init__(self, ar_embedding_size=256, enc_embedding_size=512):
@@ -137,28 +162,36 @@ class CPCAudioRawModel(pl.LightningModule):
         
         self.encoder = ConvNetEncoder(self.enc_embedding_size)
         self.ar = GRUAutoRegressiveModel(self.enc_embedding_size, ar_embedding_size)
-        self.prediction_models = []
-        for step in self.n_prediction:
-            self.prediction_models.append(
-                LinearPredictionModel(self.ar_embedding_size, self.enc_embedding_size)
-            )
+        self.cpc_criterion = CPCCriterion(self.ar_embedding_size, self.enc_embedding_size, self.n_predictions) 
         self.train_dataset = None
-        self.validation_dataset = None 
+        self.validation_dataset = None
+        
+        self.window_size = SAMPLE_LEN / DOWNSAMPLING  # context size of ar 
 
     def setup(self):
         self.train_dataset = AudioRawDataset(TRAIN_MANIFEST, sample_len=SAMPLE_LEN, min_duration=MIN_DURATION, max_duration=MAX_DURATION, trim=True)
         self.validation_dataset = AudioRawDataset(VALIDATION_MANIFEST, sample_len=SAMPLE_LEN, min_duration=MIN_DURATION, max_duration=MAX_DURATION, trim=True)
 
+    def get_samples(self, z_features):
+        pass
+
     def forward(self, audio_signal, hidden):
         enc_embedding = self.encoder(audio_signal)
-        ar_embedding, _ = self.ar(enc_embedding, hidden)
+        ar_embedding = self.ar(enc_embedding)
         return enc_embedding, ar_embedding
 
     def training_step(self, batch, batch_idx):
         audio_signal, audio_len = batch
         
-        z, c = self(audio_signal)
-         
+        z_features, c_features = self(audio_signal)
+        z_features = z_features[:, self.window_size:, :]  
+        c_t = c_features[:, self.window_size + 1, :]
+
+        samples = self.get_samples(z_features)
+        
+        loss = self.cpc_criterion(c_t, samples)
+        return loss
+
 
     def _collate_fn(self, batch):
         audio_signal, audio_len = batch
