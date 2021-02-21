@@ -1,4 +1,6 @@
+import random
 import json
+import math
 from functools import namedtuple
 
 import librosa
@@ -19,6 +21,7 @@ class AudioRawDataset(Dataset):
         self.sample_rate = sample_rate
         self.trim = trim
         self.audio_files = self._prepare_audio_text(manifest_file)
+        self.min_signal_length = math.floor(self.min_duration * self.sample_rate)
 
     def _prepare_audio_text(self, manifest_file: str) -> list:
         AudioSample = namedtuple(
@@ -49,6 +52,9 @@ class AudioRawDataset(Dataset):
         )
         if self.trim:
             audio_signal, _ = librosa.effects.trim(audio_signal, top_db=60)
+
+        sample_index = random.randrange(start=0, stop=len(audio_signal) - self.min_signal_length)
+        audio_signal = audio_signal[sample_index:]
         # audio_signal = audio_signal[:self.sample_len] 
         return audio_signal, len(audio_signal)
 
