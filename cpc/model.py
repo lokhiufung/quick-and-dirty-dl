@@ -26,18 +26,30 @@ class ConvNetEncoder(nn.Module):
         self.bnorm4 = nn.BatchNorm1d(hidden_size)
         self.conv5 = nn.Conv1d(hidden_size, hidden_size, kernel_size=4, stride=2, padding=1)
         self.bnorm5 = nn.BatchNorm1d(hidden_size)
-        
+    
+    @property
+    def input_port(self):
+        return (
+            ('audio_signal', ('B', 'C', 'T')),
+        )
+    @property
+    def output_port(self):
+        return (
+            ('encoder_embedding', ('B', 'T', 'C')),
+        )
+
     def forward(self, x):
         x = F.relu(self.bnorm1(self.conv1(x)))
         x = F.relu(self.bnorm2(self.conv2(x)))
         x = F.relu(self.bnorm3(self.conv3(x)))
         x = F.relu(self.bnorm4(self.conv4(x)))
         x = F.relu(self.bnorm5(self.conv5(x)))
+        x = x.transpose(1, 2)  # Reminder: make the channel last
         return x
 
 
 class GRUAutoRegressiveModel(nn.Module):
-    def __init__(self, embedding_size, hidden_size=256, keep_hidden=False):
+    def __init__(self, embedding_size=512, hidden_size=256, keep_hidden=False):
         super().__init__()
         self.embedding_size = embedding_size
         self.hidden_size = hidden_size
@@ -45,6 +57,16 @@ class GRUAutoRegressiveModel(nn.Module):
         self.hidden = None
 
         self.rnn = nn.GRU(self.embedding_size, hidden_size=self.hidden_size, num_layers=1, batch_first=True)
+
+    def input_port(self):
+        return (
+            ('encoder_embedding', ('B', 'T', 'C')),
+        )
+
+    def output_port(self):
+        return (
+            ('ar_embedding', ('B', 'T', 'C'))
+        )
 
     def forward(self, x):
         x, h = self.rnn(x, self.hidden)  # (batch, seq_len, hidden_size)
