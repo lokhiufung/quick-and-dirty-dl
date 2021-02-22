@@ -10,8 +10,6 @@ from torch.utils.data import Dataset, DataLoader
 import pytorch_lightning as pl
 
 
-        
-
 class ConvNetEncoder(nn.Module):
     def __init__(self, hidden_size=512):
         super().__init__()
@@ -65,7 +63,7 @@ class GRUAutoRegressiveModel(nn.Module):
 
     def output_port(self):
         return (
-            ('ar_embedding', ('B', 'T', 'C'))
+            ('ar_embedding', ('B', 'T', 'C')),
         )
 
     def forward(self, x):
@@ -74,28 +72,6 @@ class GRUAutoRegressiveModel(nn.Module):
             self.hidden = h.detach()
         return x
 
-
-
-class CPCCriterion(nn.Module):
-    def __init__(self, ar_embedding_size, enc_embedding_size, n_predictions):
-        self.ar_embedding_size = ar_embedding_size
-        self.enc_embedding_size = enc_embedding_size
-        self.loss_function = nn.CrossEntropyLoss()
-        self.prediction_models = []
-        for _ in self.n_prediction:
-            self.prediction_models.append(
-                LinearPredictionModel(self.ar_embedding_size, self.enc_embedding_size)
-            )
-
-    def forward(self, c_t, samples, labels):
-        samples, labels = self.get_samples(z_features)
-        predictions = []
-        for k in range(1, self.n_prediction + 1):
-            pred = samples[:, -k, :] * self.prediction_models[-k](c_t)  # scalar product
-            predictions.append(pred)
-
-        loss = torch.mean(losses)
-        return loss
 
 class LinearPredictionModel(nn.Module):
     def __init__(self, ar_embedding_size=256, enc_embedding_size=512):
@@ -107,6 +83,67 @@ class LinearPredictionModel(nn.Module):
         x = self.linear(x)
         return x
 
+
+class CPCCriterion(nn.Module):
+    def __init__(self, ar_embedding_size, enc_embedding_size, n_predictions, n_negs):
+        self.ar_embedding_size = ar_embedding_size
+        self.enc_embedding_size = enc_embedding_size
+        self.n_predictions = n_predictions  # max number of steps for prediction horizon
+        self.n_negs = n_negs  # number of negative samples to be sampled
+        self.loss_function = nn.CrossEntropyLoss()  # reminder: mean reduction by defualt
+        self.predictiors = []
+        for _ in self.n_predictions:
+            self.predictiors.append(
+                LinearPredictionModel(self.ar_embedding_size, self.enc_embedding_size)
+            )
+
+    @property
+    def input_port(self):
+        return (
+            ('encoder_embedding', ('B', 'T', 'C')),
+            ('ar_embedding': ('B', 'T', 'C')),
+        )
+
+    @propery
+    def output_port(self):
+        return (
+            ('loss', ('N',)),
+            ('acc', ('N',))
+        )
+
+    def get_random_samples(self, z_features, window_size):
+        samples = []
+        batch_size, steps, z_dim = z.size()
+
+        # randomly sample n_negs * batch_size for each step
+        z_neg = z.view(-1, z_dim)
+        sample_idx = torch.randint(low=0, high=batch_size*steps, size=(batch_size*self.n_negs*window_size,))
+        negs = negs[sample_idx].view(batch_size, n_negs, window_size, z_dim)
+        
+        labels = torch.zeros(size=(batch_size*window_size,))
+        for k in range(1, self.n_predictions + 1):
+            z_pos = z_features[:, k:] 
+            sample = torch.cat([z_pos, z_negs], dim=1)
+            samples.append(sample)
+        return samples, labels
+
+    def forward(self, c_features, z_features):
+        samples, label = self.get_random_samples(z_features)
+        # predictions = []
+        losses = []
+        for k in range(1, self.n_prediction + 1):
+            z_pred = self.predictors[k](c_features)
+            z_pred = z_pred.unsqueeze(1)
+            z_pos = embed[:, k:k+window_size].unsqueeze(1)
+            # z_samples = torch.cat([z_pos, z_negs], dim=1) # k step forward for k ar output, prepare e.g 10 neg samples + 1 pos sample
+            prediction = (z_pred * samples[k]).sum(dim=3)
+
+            prediction = prediction.permute(0, 2, 1)
+            prediction = prediction.contiguous().view(-1, logit.size(2))
+            loss = self.loss_function(prediction, label)
+            losses.append(loss)
+        return losses
+            
 
 class HyperParameters(object):
     def __init__(self, enc_embedding_size: int=512, ar_embedding_size: int=256,
@@ -152,32 +189,27 @@ class CPCAudioRawModel(pl.LightningModule):
         self.train_dataset = AudioRawDataset(TRAIN_MANIFEST, sample_len=SAMPLE_LEN, min_duration=MIN_DURATION, max_duration=MAX_DURATION, trim=True)
         self.validation_dataset = AudioRawDataset(VALIDATION_MANIFEST, sample_len=SAMPLE_LEN, min_duration=MIN_DURATION, max_duration=MAX_DURATION, trim=True)
 
-    def get_samples(self, z_features):
-        pass
-
     def forward(self, audio_signal, hidden):
-        enc_embedding = self.encoder(audio_signal)
-        ar_embedding = self.ar(enc_embedding)
-        return enc_embedding, ar_embedding
+        z_features = self.encoder(audio_signal)
+        c_features = self.ar(enc_embedding)
+
+        return z_features, c_features
 
     def training_step(self, batch, batch_idx):
-        audio_signal, audio_len = batch
-        
-        z_features, c_features = self(audio_signal)
-        z_features = z_features[:, self.window_size:, :]  
-        c_t = c_features[:, self.window_size + 1, :]
-
-        samples = self.get_samples(z_features)
-        
-        loss = self.cpc_criterion(c_t, samples)
+        """
+        batch: audio_signals; tensor (B, C, L)
+        """
+        z_features, c_features = self(batch)
+        c_features = c_features[:, :self.window_size]
+        # random_samples = self.get_random_samples(z_features)
+        loss = self.cpc_criterion(c_features, z_features)
         return loss
 
-
-    def _collate_fn(self, batch):
-        audio_signal, audio_len = batch
-        audio_signal = torch.from_numpy(audio_signal.astype(np.float32))
-        audio_len = torch.from_numpy(audio_len.astype(np.int8))
-        return audio_signal, audio_len
+    # def _collate_fn(self, batch):
+    #     audio_signal, audio_len = batch
+    #     audio_signal = torch.from_numpy(audio_signal.astype(np.float32))
+    #     audio_len = torch.from_numpy(audio_len.astype(np.int8))
+    #     return audio_signal, audio_len
 
     def train_dataloader(self):
         self.train_dataset = AudioRawDataset(
