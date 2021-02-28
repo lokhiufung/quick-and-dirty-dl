@@ -2,12 +2,15 @@ import json
 from functools import namedtuple
 import random
 
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.optim import Adam
 from torch.utils.data import Dataset, DataLoader
 import pytorch_lightning as pl
+from omegaconf import DictConfig
+
+from cpc.dataset import AudioRawDataset
 
 
 class ConvNetEncoder(nn.Module):
@@ -85,15 +88,16 @@ class LinearPredictionModel(nn.Module):
 
 
 class CPCCriterion(nn.Module):
-    def __init__(self, ar_embedding_size, enc_embedding_size, n_predictions, n_negs):
+    def __init__(self, ar_embedding_size=256, enc_embedding_size=512, n_predictions=12, n_negs=8):
+        super().__init__()
         self.ar_embedding_size = ar_embedding_size
         self.enc_embedding_size = enc_embedding_size
         self.n_predictions = n_predictions  # max number of steps for prediction horizon
         self.n_negs = n_negs  # number of negative samples to be sampled
         self.loss_function = nn.CrossEntropyLoss()  # reminder: mean reduction by defualt
-        self.predictiors = []
-        for _ in self.n_predictions:
-            self.predictiors.append(
+        self.predictors = []
+        for _ in range(self.n_predictions):
+            self.predictors.append(
                 LinearPredictionModel(self.ar_embedding_size, self.enc_embedding_size)
             )
 
@@ -101,10 +105,10 @@ class CPCCriterion(nn.Module):
     def input_port(self):
         return (
             ('encoder_embedding', ('B', 'T', 'C')),
-            ('ar_embedding': ('B', 'T', 'C')),
+            ('ar_embedding', ('B', 'T', 'C')),
         )
 
-    @propery
+    @property
     def output_port(self):
         return (
             ('loss', ('N',)),
@@ -113,86 +117,84 @@ class CPCCriterion(nn.Module):
 
     def get_random_samples(self, z_features, window_size):
         samples = []
-        batch_size, steps, z_dim = z.size()
+        batch_size, steps, z_dim = z_features.size()
 
         # randomly sample n_negs * batch_size for each step
-        z_neg = z.view(-1, z_dim)
+        z_neg = z_features.contiguous().view(-1, z_dim)
         sample_idx = torch.randint(low=0, high=batch_size*steps, size=(batch_size*self.n_negs*window_size,))
-        negs = negs[sample_idx].view(batch_size, n_negs, window_size, z_dim)
+        z_neg = z_neg[sample_idx].view(batch_size, self.n_negs, window_size, z_dim)
         
-        labels = torch.zeros(size=(batch_size*window_size,))
+        labels = torch.zeros(size=(batch_size*window_size,), dtype=torch.long)
         for k in range(1, self.n_predictions + 1):
-            z_pos = z_features[:, k:] 
-            sample = torch.cat([z_pos, z_negs], dim=1)
+            z_pos = z_features[:, k:k+window_size].unsqueeze(1) 
+            sample = torch.cat([z_pos, z_neg], dim=1)
             samples.append(sample)
         return samples, labels
 
-    def forward(self, c_features, z_features):
-        samples, label = self.get_random_samples(z_features)
-        # predictions = []
+    def forward(self, c_features, z_features, window_size):
+        c_features = c_features[:, :window_size]
+        samples, labels = self.get_random_samples(z_features, window_size)
         losses = []
-        for k in range(1, self.n_prediction + 1):
+        for k in range(self.n_predictions):
             z_pred = self.predictors[k](c_features)
             z_pred = z_pred.unsqueeze(1)
-            z_pos = embed[:, k:k+window_size].unsqueeze(1)
-            # z_samples = torch.cat([z_pos, z_negs], dim=1) # k step forward for k ar output, prepare e.g 10 neg samples + 1 pos sample
             prediction = (z_pred * samples[k]).sum(dim=3)
 
             prediction = prediction.permute(0, 2, 1)
-            prediction = prediction.contiguous().view(-1, logit.size(2))
-            loss = self.loss_function(prediction, label)
-            losses.append(loss)
-        return losses
+            prediction = prediction.contiguous().view(-1, prediction.size(2))
+            loss = self.loss_function(prediction, labels)
+            losses.append(loss.view(1, -1))
+        return torch.cat(losses, dim=1)
             
 
-class HyperParameters(object):
-    def __init__(self, enc_embedding_size: int=512, ar_embedding_size: int=256,
-        lr: float=2e-4, batch_size: int=16, n_prediction: int=12
-        ):
-        self.enc_embedding_size = enc_embedding_size
-        self.ar_embedding_size = ar_embedding_size
-        self.lr = lr
-        self.batch_size = batch_size
-        self.n_prediction = n_prediction
-
-
-################################
-# ENV VARIABLES
-TRAIN_MANIFEST = ''
-VALIDATION_MANIFEST = ''
-SAMPLE_RATE = 16000
-DOWNSAMPLING = 160
-MAX_DURATION = 16.7
-SAMPLE_LEN = 20480
-N_PREDICTION = 12
-MIN_DURATION = (SAMPLE_LEN + N_PREDICTION * DOWNSAMPLING + 1) / SAMPLE_RATE  # prepare n_prediction + 1 steps
-################################ 
-
-
 class CPCAudioRawModel(pl.LightningModule):
-    def __init__(self, batch_size: int=16, lr: float=2e-4, enc_embedding_size: int=512, ar_embedding_size: int=256, n_prediction: int=12):
-        self.batch_size = batch_size
-        self.lr = lr
-        self.enc_embedding_size = enc_embedding_size
-        self.ar_embedding_size = ar_embedding_size
-        self.n_prediction = n_prediction
+    def __init__(self, cfg: DictConfig):
+        super().__init__()
+        self.window_size = cfg.window_size // cfg.downsampling  # number of steps in encoded space  
+        # self.enc_embedding_size = cfg.enc_embedding_size
+        # self.ar_embedding_size = cfg.ar_embedding_size
+        # self.n_predictions = cfg.n_predictions
         
-        self.encoder = ConvNetEncoder(self.enc_embedding_size)
-        self.ar = GRUAutoRegressiveModel(self.enc_embedding_size, ar_embedding_size)
-        self.cpc_criterion = CPCCriterion(self.ar_embedding_size, self.enc_embedding_size, self.n_predictions) 
-        self.train_dataset = None
-        self.validation_dataset = None
+        self.encoder = ConvNetEncoder(**cfg.encoder)
+        self.ar = GRUAutoRegressiveModel(**cfg.ar)
+        self.cpc_criterion = CPCCriterion(**cfg.cpc_criterion)
+
+        self._train_dataset = None
+        self._validation_dataset = None
+        self._train_dataloader = None
+        self._val_dataloader = None
+        self._optimizers = None
         
-        self.window_size = SAMPLE_LEN / DOWNSAMPLING  # context size of ar 
+        self.setup_train_dataloader(cfg.train_data)
+        self.setup_val_dataloader(cfg.validation_data)
+        self.setup_optimizers(cfg.optim)
 
-    def setup(self):
-        self.train_dataset = AudioRawDataset(TRAIN_MANIFEST, sample_len=SAMPLE_LEN, min_duration=MIN_DURATION, max_duration=MAX_DURATION, trim=True)
-        self.validation_dataset = AudioRawDataset(VALIDATION_MANIFEST, sample_len=SAMPLE_LEN, min_duration=MIN_DURATION, max_duration=MAX_DURATION, trim=True)
+    def setup_optimizers(self, optim_cfg: DictConfig):
+        self._optimizers = Adam(self.parameters(), **optim_cfg)
 
-    def forward(self, audio_signal, hidden):
+    def setup_train_dataloader(self, train_data_cfg: DictConfig):
+        self._train_dataset = AudioRawDataset(
+            **train_data_cfg.dataset
+        )
+        self._train_dataloader = DataLoader(
+            self._train_dataset,
+            collate_fn=self._train_dataset.collate_fn,
+            **train_data_cfg.dataloader
+        )
+    
+    def setup_val_dataloader(self, validation_data_cfg: DictConfig):
+        self._validation_dataset = AudioRawDataset(
+            **validation_data_cfg.dataset
+        )
+        self._val_dataloader = DataLoader(
+            self._validation_dataset,
+            collate_fn=self._validation_dataset.collate_fn,
+            **validation_data_cfg.dataloader
+        )
+
+    def forward(self, audio_signal):
         z_features = self.encoder(audio_signal)
-        c_features = self.ar(enc_embedding)
-
+        c_features = self.ar(z_features)
         return z_features, c_features
 
     def training_step(self, batch, batch_idx):
@@ -200,33 +202,41 @@ class CPCAudioRawModel(pl.LightningModule):
         batch: audio_signals; tensor (B, C, L)
         """
         z_features, c_features = self(batch)
-        c_features = c_features[:, :self.window_size]
+        # c_features = c_features[:, :self.window_size]
         # random_samples = self.get_random_samples(z_features)
-        loss = self.cpc_criterion(c_features, z_features)
-        return loss
+        losses = self.cpc_criterion(c_features, z_features, self.window_size)
+        total_loss = losses.sum(dim=1)
+    
+        self.log('train_loss', total_loss, on_step=True, prog_bar=True, logger=True)
+        return total_loss
 
-    # def _collate_fn(self, batch):
-    #     audio_signal, audio_len = batch
-    #     audio_signal = torch.from_numpy(audio_signal.astype(np.float32))
-    #     audio_len = torch.from_numpy(audio_len.astype(np.int8))
-    #     return audio_signal, audio_len
+    def validation_step(self, batch, batch_idx):
+        """
+        batch: audio_signals; tensor (B, C, L)
+        """
+        z_features, c_features = self(batch)
+        # c_features = c_features[:, :self.window_size]
+        # random_samples = self.get_random_samples(z_features)
+        losses = self.cpc_criterion(c_features, z_features, self.window_size)
+        total_loss = losses.sum(dim=1)
+    
+        self.log('val_loss', total_loss, on_step=True, prog_bar=True, logger=True)
+        return total_loss
 
     def train_dataloader(self):
-        self.train_dataset = AudioRawDataset(
-            manifest_file=TRAIN_MANIFEST,
-            sample_rate=SAMPLE_RATE,
-            min_duration=MIN_DURATION,
-            max_duration=MAX_DURATION,
-            trim=True
-        )
-        return DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=4, collate_fn=self._collate_fn)
+        if self._train_dataloader:
+            return self._train_dataloader
+        else:
+            raise AttributeError('Please setup_train_dataloader() first')
 
-    def validation_dataloader(self):
-        self.validation_dataset = AudioRawDataset(
-            manifest_file=VALIDATION_MANIFEST,
-            sample_rate=SAMPLE_RATE,
-            min_duration=MIN_DURATION,
-            max_duration=MAX_DURATION,
-            trim=True
-        )
-        return DataLoader(self.validation_dataset, batch_size=self.batch_size, shuffle=True, num_workers=4, collate_fn=self._collate_fn)
+    def val_dataloader(self):
+        if self._val_dataloader:
+            return self._val_dataloader
+        else:
+            raise AttributeError('Please setup_val_dataloader() first')
+    
+    def configure_optimizers(self):
+        if self._optimizers:
+            return self._optimizers
+        else:
+            raise AttributeError('Please setup_optimizers() first')

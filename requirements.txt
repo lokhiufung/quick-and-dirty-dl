@@ -1,0 +1,8 @@
+pytorch==1.7.0
+torchaudio==0.7.0
+torchtext==0.6.0
+pytorch_lightning==1.1.2
+
+numpy
+librosa
+hydra-core==1.0.6  # from easy configuration

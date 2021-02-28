@@ -1,0 +1,58 @@
+name: cpc_raw_audio
+
+sample_rate: &sample_rate 16000
+window_size: &window_size 20480  #tmp: 20480 + 12 steps on encoded space
+downsampling: &downsampling 160
+n_predictions: &n_predictions 12
+enc_embedding_size: &enc_embedding_size 512
+ar_embedding_size: &ar_embedding_size 256
+
+model:
+  window_size: *window_size
+  downsampling: *downsampling
+  train_data:
+    dataset:
+      manifest_file: ???
+      sample_len: 22400
+      sample_rate: *sample_rate
+      trim: true
+    dataloader:
+      batch_size: 8
+      shuffle: true
+      num_workers: 2
+    
+  validation_data:
+    dataset:
+      manifest_file: ???
+      sample_len: 22400
+      sample_rate: *sample_rate
+      trim: true
+    dataloader:
+      batch_size: 8
+      shuffle: false
+      num_workers: 2
+
+  encoder:
+    hidden_size: *enc_embedding_size
+
+  ar:
+    embedding_size: *enc_embedding_size
+    hidden_size: *ar_embedding_size
+
+  cpc_criterion:
+    ar_embedding_size: *ar_embedding_size
+    enc_embedding_size: *enc_embedding_size
+    n_predictions: *n_predictions
+    n_negs: 8
+
+  optim:
+    lr: 2e-4
+    betas: [0.9, 0.999]
+    eps: 1e-8
+    weight_decay: 0.0
+  
+trainer:
+  gpus: 0
+  checkpoint_callback: true
+  max_epochs: 20
+  max_steps: 300000

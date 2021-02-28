@@ -10,18 +10,22 @@ from torch.utils.data import Dataset
 
 
 class AudioRawDataset(Dataset):
-    def __init__(self, manifest_file: str, sample_len: int=20480, sample_rate: int=16000, min_duration: float=0.1, max_duration: float=16.7, trim: bool=True):
+    def __init__(self, manifest_file: str, sample_len: int, sample_rate: int=16000, trim: bool=True, buffer_len: int=1):
         """
         Train on sampled audio windows of length 20480
         LibriSpeech train-100
+        manifest_file: str, manifest file
+        sample_len: int, number of steps to be sampled
+        sample_rate: int, sample rate of the audio
+        trim: bool, to trim leadning/trailing silence
+        buffer_len: int, 
         """
-        self.min_duration = min_duration
-        self.max_duration = max_duration
-        self.sample_len = sample_len
+        self.sample_len = sample_len 
         self.sample_rate = sample_rate
+        self.min_duration = (self.sample_len + buffer_len) / sample_rate  # for stability; make sure the audio contain enough steps
         self.trim = trim
         self.audio_files = self._prepare_audio_text(manifest_file)
-        self.min_signal_length = math.floor(self.min_duration * self.sample_rate)
+        # self.min_signal_length = math.floor(self.min_duration * self.sample_rate)
 
     def _prepare_audio_text(self, manifest_file: str) -> list:
         AudioSample = namedtuple(
@@ -33,7 +37,7 @@ class AudioRawDataset(Dataset):
             for line in f:
                 item = json.loads(line)
                 # filter audio with window_size + prediction_step * downsampling factor
-                if (item['duration'] >= self.min_duration) and (item['duration'] <= self.max_duration):
+                if item['duration'] > self.min_duration:
                     audio_files.append(
                         AudioSample(audio_filepath=item['audio_filepath'], duration=item['duration'])
                     )
@@ -53,8 +57,8 @@ class AudioRawDataset(Dataset):
         if self.trim:
             audio_signal, _ = librosa.effects.trim(audio_signal, top_db=60)
 
-        sample_index = random.randrange(start=0, stop=len(audio_signal) - self.min_signal_length)
-        audio_signal = audio_signal[sample_index:]
+        sample_index = random.randrange(start=0, stop=len(audio_signal) - self.sample_len)
+        audio_signal = audio_signal[sample_index:sample_index+self.sample_len]
         # audio_signal = audio_signal[:self.sample_len] 
         return audio_signal, len(audio_signal)
 
