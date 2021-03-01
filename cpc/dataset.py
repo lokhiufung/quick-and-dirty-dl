@@ -48,19 +48,24 @@ class AudioRawDataset(Dataset):
         return len(self.audio_files)
 
     def __getitem__(self, index: int):
+        # try:
         audio_sample = self.audio_files[index]
         audio_signal, _ = librosa.load(
             audio_sample.audio_filepath,
             sr=self.sample_rate,
             mono=True,
         )
-        if self.trim:
-            audio_signal, _ = librosa.effects.trim(audio_signal, top_db=60)
+        # FIXME: trimmed audio may be shorter than self.sample_len. This may induce error in random index.
+        # if self.trim:
+        #     audio_signal, _ = librosa.effects.trim(audio_signal, top_db=60)
 
         sample_index = random.randrange(start=0, stop=len(audio_signal) - self.sample_len)
         audio_signal = audio_signal[sample_index:sample_index+self.sample_len]
         # audio_signal = audio_signal[:self.sample_len] 
         return audio_signal, len(audio_signal)
+        # except:
+        #     print(audio_sample)
+        #     raise Exception('dataset error')
 
     def collate_fn(self, batch):
         audio_lengths = [sample[1] for sample in batch]

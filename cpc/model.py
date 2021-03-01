@@ -95,7 +95,7 @@ class CPCCriterion(nn.Module):
         self.n_predictions = n_predictions  # max number of steps for prediction horizon
         self.n_negs = n_negs  # number of negative samples to be sampled
         self.loss_function = nn.CrossEntropyLoss()  # reminder: mean reduction by defualt
-        self.predictors = []
+        self.predictors = nn.ModuleList()
         for _ in range(self.n_predictions):
             self.predictors.append(
                 LinearPredictionModel(self.ar_embedding_size, self.enc_embedding_size)
@@ -121,10 +121,10 @@ class CPCCriterion(nn.Module):
 
         # randomly sample n_negs * batch_size for each step
         z_neg = z_features.contiguous().view(-1, z_dim)
-        sample_idx = torch.randint(low=0, high=batch_size*steps, size=(batch_size*self.n_negs*window_size,))
+        sample_idx = torch.randint(low=0, high=batch_size*steps, size=(batch_size*self.n_negs*window_size,), device=z_features.device)
         z_neg = z_neg[sample_idx].view(batch_size, self.n_negs, window_size, z_dim)
         
-        labels = torch.zeros(size=(batch_size*window_size,), dtype=torch.long)
+        labels = torch.zeros(size=(batch_size*window_size,), dtype=torch.long, device=z_features.device)
         for k in range(1, self.n_predictions + 1):
             z_pos = z_features[:, k:k+window_size].unsqueeze(1) 
             sample = torch.cat([z_pos, z_neg], dim=1)
@@ -135,6 +135,7 @@ class CPCCriterion(nn.Module):
         c_features = c_features[:, :window_size]
         samples, labels = self.get_random_samples(z_features, window_size)
         losses = []
+        accs = []
         for k in range(self.n_predictions):
             z_pred = self.predictors[k](c_features)
             z_pred = z_pred.unsqueeze(1)
@@ -142,9 +143,15 @@ class CPCCriterion(nn.Module):
 
             prediction = prediction.permute(0, 2, 1)
             prediction = prediction.contiguous().view(-1, prediction.size(2))
+            #####################################################
+            # accuracy calculation, direct copy from: facebook/cpc_audio
+            _, pred_index = prediction.max(1)
+            acc = torch.sum(pred_index == labels).float()
+            #####################################################
             loss = self.loss_function(prediction, labels)
             losses.append(loss.view(1, -1))
-        return torch.cat(losses, dim=1)
+            accs.append(acc.view(1, -1))
+        return torch.cat(losses, dim=1), torch.cat(accs, dim=1)
             
 
 class CPCAudioRawModel(pl.LightningModule):
@@ -168,6 +175,9 @@ class CPCAudioRawModel(pl.LightningModule):
         self.setup_train_dataloader(cfg.train_data)
         self.setup_val_dataloader(cfg.validation_data)
         self.setup_optimizers(cfg.optim)
+
+        # this will save cfg as hyparams to ckpts and tensorboard
+        self.hparams = cfg
 
     def setup_optimizers(self, optim_cfg: DictConfig):
         self._optimizers = Adam(self.parameters(), **optim_cfg)
@@ -204,9 +214,11 @@ class CPCAudioRawModel(pl.LightningModule):
         z_features, c_features = self(batch)
         # c_features = c_features[:, :self.window_size]
         # random_samples = self.get_random_samples(z_features)
-        losses = self.cpc_criterion(c_features, z_features, self.window_size)
+        losses, accs = self.cpc_criterion(c_features, z_features, self.window_size)
         total_loss = losses.sum(dim=1)
-    
+        aver_acc = accs.mean(dim=1) 
+
+        self.log('train_aver_acc', aver_acc, on_step=True, prog_bar=True, logger=True)
         self.log('train_loss', total_loss, on_step=True, prog_bar=True, logger=True)
         return total_loss
 
@@ -217,9 +229,11 @@ class CPCAudioRawModel(pl.LightningModule):
         z_features, c_features = self(batch)
         # c_features = c_features[:, :self.window_size]
         # random_samples = self.get_random_samples(z_features)
-        losses = self.cpc_criterion(c_features, z_features, self.window_size)
+        losses, accs = self.cpc_criterion(c_features, z_features, self.window_size)
         total_loss = losses.sum(dim=1)
-    
+        aver_acc = accs.mean(dim=1) 
+        
+        self.log('val_aver_acc', aver_acc, on_step=True, prog_bar=True, logger=True)
         self.log('val_loss', total_loss, on_step=True, prog_bar=True, logger=True)
         return total_loss
 
