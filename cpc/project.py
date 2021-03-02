@@ -1,42 +1,61 @@
-import yaml
+import os
+import argparse
 
-from omegaconf import DictConfig
+import tqdm
 import numpy as np
 from sklearn.manifold import TSNE
 import plotly.express as px
 import torch
 from torch.utils.data import DataLoader
-import plotly.express as px
 
 from cpc.model import CPCAudioRawModel
 from cpc.dataset import AudioRawDataset
 
 
-cpc_model = CPCAudioRawModel.load_from_checkpoint(checkpoint_path='outputs/2021-02-25/18-18-53/lightning_logs/version_0/checkpoints/epoch=1432-step=179061.ckpt', cfg=cfg.model)
-cpc_model.eval()
-
-dataset = AudioRawDataset(
-    manifest_file='',
-    sample_len=20480,
-)
-dataloader = DataLoader(dataset, shuffle=False, batch_size=16, collate_fn=dataset.collate_fn)
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--ckpt', type=str, required=True, help='ckpt of cpc model')
+    parser.add_argument('--manifest_file', type=str, required=True, help='manifest file')
+    parser.add_argument('--device', type=str, choices=['gpu', 'cpu'], default='cpu')
+    return parser.parse_args()
 
 
-embeddings = []
-with torch.no_grad():
-    for audio_signal in dataloader:
-        _, c = cpc_model(audio_signal)
-        embeddings.append(c[..., -1])
+def main():
+    args = parse_args()
 
-labels = [sample.audio_filepath.split('/')[-3] for sample in dataset.audio_files]
-embeddings = np.concatenate(embeddings, axis=0) 
-tsne = TSNE(
-    n_components=2,
-    perplexity=10.0,
-    verbose=1
-)
+    cpc_model = CPCAudioRawModel.load_from_checkpoint(checkpoint_path=args.ckpt)
+    cpc_model.eval()
 
-projections = tsne.fit_transform(embeddings)
+    dataset = AudioRawDataset(
+        manifest_file=args.manifest_file,
+        sample_len=22400,
+    )
+    dataloader = DataLoader(dataset, shuffle=False, batch_size=16, collate_fn=dataset.collate_fn)
 
-fig = px.scatter(x=projections[:, 0], y=projections[:, 1], color=labels)
-fig.show()
+    if args.device == 'gpu':
+        cpc_model.to('cuda:0')
+    embeddings = []
+    with torch.no_grad():
+        for audio_signal in tqdm.tqdm(dataloader):
+            if args.device == 'gpu':
+                audio_signal = audio_signal.cuda()
+            _, c = cpc_model(audio_signal)
+            embeddings.append(c[..., -1].cpu().numpy())
+
+    labels = [os.path.basename(sample.audio_filepath).split('-')[0] for sample in dataset.audio_files]
+    embeddings = np.concatenate(embeddings, axis=0) 
+    tsne = TSNE(
+        n_components=2,
+        perplexity=10.0,
+        verbose=1
+    )
+
+    projections = tsne.fit_transform(embeddings)
+
+    fig = px.scatter(x=projections[:, 0], y=projections[:, 1], color=labels)
+    fig.show()
+
+
+if __name__ == '__main__':
+    main()
+    

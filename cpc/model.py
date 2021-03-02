@@ -158,10 +158,7 @@ class CPCAudioRawModel(pl.LightningModule):
     def __init__(self, cfg: DictConfig):
         super().__init__()
         self.window_size = cfg.window_size // cfg.downsampling  # number of steps in encoded space  
-        # self.enc_embedding_size = cfg.enc_embedding_size
-        # self.ar_embedding_size = cfg.ar_embedding_size
-        # self.n_predictions = cfg.n_predictions
-        
+                
         self.encoder = ConvNetEncoder(**cfg.encoder)
         self.ar = GRUAutoRegressiveModel(**cfg.ar)
         self.cpc_criterion = CPCCriterion(**cfg.cpc_criterion)

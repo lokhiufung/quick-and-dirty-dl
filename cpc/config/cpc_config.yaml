@@ -6,6 +6,7 @@ downsampling: &downsampling 160
 n_predictions: &n_predictions 12
 enc_embedding_size: &enc_embedding_size 512
 ar_embedding_size: &ar_embedding_size 256
+n_negs: &n_negs 8  # from facebook/cpc_audio
 
 model:
   window_size: *window_size
@@ -43,7 +44,7 @@ model:
     ar_embedding_size: *ar_embedding_size
     enc_embedding_size: *enc_embedding_size
     n_predictions: *n_predictions
-    n_negs: 8
+    n_negs: *n_negs
 
   optim:
     lr: 2e-4
