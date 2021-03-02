@@ -151,7 +151,7 @@ class CPCCriterion(nn.Module):
             loss = self.loss_function(prediction, labels)
             losses.append(loss.view(1, -1))
             accs.append(acc.view(1, -1))
-        return torch.cat(losses, dim=1), torch.cat(accs, dim=1)
+        return torch.cat(losses, dim=1), torch.cat(accs, dim=1) / labels.size(0)
             
 
 class CPCAudioRawModel(pl.LightningModule):
