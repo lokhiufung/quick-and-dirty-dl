@@ -39,14 +39,19 @@ def main():
         for audio_signal in tqdm.tqdm(dataloader):
             if args.device == 'gpu':
                 audio_signal = audio_signal.cuda()
-            _, c = cpc_model(audio_signal)
-            embeddings.append(c[..., -1].cpu().numpy())
+            z, _ = cpc_model(audio_signal)
+            embeddings.append(z.mean(dim=1).cpu().numpy())  # average over timesteps
+            # _, c = cpc_model(audio_signal)
+            # embeddings.append(c[..., -1].cpu().numpy())
 
     labels = [os.path.basename(sample.audio_filepath).split('-')[0] for sample in dataset.audio_files]
     embeddings = np.concatenate(embeddings, axis=0) 
     tsne = TSNE(
         n_components=2,
-        perplexity=10.0,
+        perplexity=20.0,
+        learning_rate=200.0,
+        n_iter=5000,
+        n_jobs=-1,
         verbose=1
     )
 
