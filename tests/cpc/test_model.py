@@ -1,24 +1,63 @@
-import os
+from omegaconf import DictConfig 
 
-import tqdm
-import torch
-from torch.utils.data import DataLoader
-
-from cpc.model import ConvNetEncoder, GRUAutoRegressiveModel, LinearPredictionModel, CPCAudioRawModel
-from cpc.dataset import AudioRawDataset
+from cpc.model import CPCAudioRawModel
 
 
-USER = os.environ['USER']
-# encoder = ConvNetEncoder()
-# ar = GRUAutoRegressiveModel()
-# predictors = [LinearPredictionModel() for _ in range(12)]
+def test_cpc_audio_raw_model(manifest_file):
+    sample_len = 20480 + int(12 * 160)
+    
+    model_cfg = {
+        'window_size': 20480,
+        'downsampling': 160,
+        'train_data': {
+            'dataset': {
+                'manifest_file': manifest_file,
+                'sample_len': sample_len,
+                'sample_rate': 16000
+            },
+            'dataloader': {
+                'batch_size': 8,
+                'shuffle': True,
+                'num_workers': 2
+            }
+        },
+        'validation_data': {
+            'dataset': {
+                'manifest_file': manifest_file,
+                'sample_len': sample_len,
+                'sample_rate': 16000
+            },
+            'dataloader': {
+                'batch_size': 8,
+                'shuffle': False,
+                'num_workers': 2
+            }
+        },
+        
+        'encoder': {
+            'hidden_size': 512
+        },
+        'ar': {
+            'embedding_size': 512,
+            'hidden_size': 256
+        },
+        'cpc_criterion': {
+            'ar_embedding_size': 256,
+            'enc_embedding_size': 512,
+            'n_predictions': 12,
+            'n_negs': 128
+        },
+        'optim': {
+            'lr': 2e-4,
+            'betas': [0.9, 0.999],
+            'eps': 1e-8,
+            'weight_decay': 0.0
+        }
+    }
 
-dataset = AudioRawDataset(
-    manifest_file=f'/home/{USER}/data/english/LibriSpeech/train-clean-100-validation.json',
-)
-dataloader = DataLoader(dataset, batch_size=4, shuffle=True, collate_fn=dataset.collate_fn, num_workers=4)
+    cpc_model = CPCAudioRawModel(cfg=DictConfig(model_cfg))
+    batch = next(iter(cpc_model.train_dataloader()))
+    loss = cpc_model.training_step(batch, 1)
 
-batch = next(iter(dataloader))
-cpc_model = CPCAudioRawModel()
-loss = cpc_model.training_step(batch, 1)
-print(loss)
+    assert len(loss.size()) == 1
+ 
